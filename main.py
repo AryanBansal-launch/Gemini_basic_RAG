@@ -14,33 +14,25 @@ try:
     load_dotenv()
 
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-    PDF_PATH = os.getenv("PDF_PATH")
     CHROMA_PATH = os.getenv("CHROMA_PATH")
     CHROMA_COLLECTION = os.getenv("CHROMA_COLLECTION")
+    PDF_PATH = os.getenv("PDF_PATH")  # Only used for CLI mode
 
-    if not all([GEMINI_API_KEY, PDF_PATH, CHROMA_PATH, CHROMA_COLLECTION]):
+    if not all([GEMINI_API_KEY, CHROMA_PATH, CHROMA_COLLECTION]):
         raise ValueError("One or more environment variables are missing. Please check your .env file.")
 
-    # Step 1: Load PDF
-
-    def load_pdf(file_path):
-        reader = PdfReader(file_path)
+    # Step 1: Load PDF(s)
+    def load_pdf_from_filelike(filelike):
+        reader = PdfReader(filelike)
         text = ""
         for page in reader.pages:
             text += page.extract_text()
         return text
 
-    pdf_text = load_pdf(file_path=PDF_PATH)
-
-    # Step 2: Split text into chunks
-
     def split_text(text: str):
         split_text = re.split(r'\n\s*\n', text)
         return [i for i in split_text if i.strip() != ""]
 
-    chunked_text = split_text(text=pdf_text)
-
-    # Step 3: Embedding function
     from chromadb import Documents, EmbeddingFunction, Embeddings
 
     def print_available_models():
@@ -61,29 +53,23 @@ try:
                                        task_type="retrieval_document",
                                        title=title)["embedding"]
 
-    # Step 4: Create Chroma DB
-
-    def create_chroma_db(documents: List[str], path: str, name: str):
+    def create_or_load_chroma_collection(path, name):
         chroma_client = chromadb.PersistentClient(path=path)
-        db = chroma_client.create_collection(name=name, embedding_function=GeminiEmbeddingFunction())
-        for i, d in enumerate(documents):
-            db.add(documents=[d], ids=[str(i)])
+        try:
+            db = chroma_client.get_collection(name=name, embedding_function=GeminiEmbeddingFunction())
+        except Exception:
+            db = chroma_client.create_collection(name=name, embedding_function=GeminiEmbeddingFunction())
         return db
 
-    # Step 5: Load Chroma Collection
-
-    def load_chroma_collection(path, name):
-        chroma_client = chromadb.PersistentClient(path=path)
-        db = chroma_client.get_collection(name=name, embedding_function=GeminiEmbeddingFunction())
-        return db
-
-    # Step 6: Get relevant passage
+    def add_chunks_to_chroma(db, chunks, file_name, start_id=0):
+        # Get current count to avoid ID collisions
+        current_count = len(db.get()["ids"]) if db.count() > 0 else 0
+        for i, chunk in enumerate(chunks):
+            db.add(documents=[chunk], ids=[str(current_count + i)], metadatas=[{"source": file_name}])
 
     def get_relevant_passage(query, db, n_results):
         result = db.query(query_texts=[query], n_results=n_results)
-        return result['documents'][0]
-
-    # Step 7: Make RAG prompt
+        return result['documents'][0], result.get('metadatas', [[]])[0]
 
     def make_rag_prompt(query, relevant_passage):
         escaped = relevant_passage.replace("'", "").replace('"', "").replace("\n", " ")
@@ -94,29 +80,41 @@ strike a friendly and conversational tone. \
 If the passage is irrelevant to the answer, you may ignore it.\nQUESTION: '{query}'\nPASSAGE: '{escaped}'\n\nANSWER:\n""")
         return prompt
 
-    # Step 8: Generate answer
-
     def generate_gemini_answer(prompt):
         genai.configure(api_key=GEMINI_API_KEY)
-        # Use model name from env or fallback to 'gemini-pro'
         model_name = os.getenv("GEMINI_GENERATION_MODEL", "gemini-pro")
         model = genai.GenerativeModel(model_name)
         answer = model.generate_content(prompt)
         return answer.text
 
     def answer_query(db, query):
-        relevant_text = get_relevant_passage(query, db, n_results=3)
-        prompt = make_rag_prompt(query, relevant_passage=" ".join(relevant_text))
+        relevant_texts, metadatas = get_relevant_passage(query, db, n_results=3)
+        prompt = make_rag_prompt(query, relevant_passage=" ".join(relevant_texts))
         answer = generate_gemini_answer(prompt)
+        # Optionally, show sources
+        sources = set(md.get("source", "") for md in metadatas if md)
+        if sources:
+            answer += f"\n\n:sparkles: **Sources:** {', '.join(sources)}"
         return answer
 
     def interactive_chat():
         st.set_page_config(page_title="RAG Gemini Chatbot", page_icon="🤖")
         st.title("RAG Gemini Chatbot")
-        st.write("Ask questions about your PDF!")
-        db = load_chroma_collection(path=CHROMA_PATH, name=CHROMA_COLLECTION)
+        st.write("Ask questions about your uploaded PDFs!")
+        db = create_or_load_chroma_collection(path=CHROMA_PATH, name=CHROMA_COLLECTION)
         if "chat_history" not in st.session_state:
             st.session_state.chat_history = []
+        if "files_added" not in st.session_state:
+            st.session_state.files_added = set()
+        uploaded_files = st.file_uploader("Upload PDF files", type="pdf", accept_multiple_files=True)
+        if uploaded_files:
+            for file in uploaded_files:
+                if file.name not in st.session_state.files_added:
+                    text = load_pdf_from_filelike(file)
+                    chunks = split_text(text)
+                    add_chunks_to_chroma(db, chunks, file.name)
+                    st.session_state.files_added.add(file.name)
+                    st.success(f"Added {file.name} to knowledge base!")
         for q, a in st.session_state.chat_history:
             with st.chat_message("user"):
                 st.markdown(q)
@@ -136,6 +134,12 @@ If the passage is irrelevant to the answer, you may ignore it.\nQUESTION: '{quer
         if len(sys.argv) > 1 and sys.argv[1] == "--list-models":
             print_available_models()
             exit(0)
+        # CLI mode: fallback to PDF_PATH for batch ingestion
+        if PDF_PATH:
+            pdf_text = load_pdf_from_filelike(open(PDF_PATH, "rb"))
+            chunked_text = split_text(text=pdf_text)
+            db = create_or_load_chroma_collection(path=CHROMA_PATH, name=CHROMA_COLLECTION)
+            add_chunks_to_chroma(db, chunked_text, os.path.basename(PDF_PATH))
         interactive_chat()
 except Exception as e:
     st.error(f"An error occurred: {e}")
