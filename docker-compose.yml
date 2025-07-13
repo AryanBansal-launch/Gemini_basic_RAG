@@ -1,0 +1,12 @@
+version: '3.8'
+services:
+  rag-gemini-chatbot:
+    build: .
+    container_name: rag-gemini-chatbot
+    env_file:
+      - .env
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./chroma:/app/chroma  # Persist ChromaDB data
+    restart: unless-stopped 

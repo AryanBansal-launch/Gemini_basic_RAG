@@ -60,6 +60,40 @@ You can also ingest a PDF via CLI (for batch mode):
 python main.py  # Uses PDF_PATH from .env
 ```
 
+## Docker & Deployment
+
+### Run with Docker
+
+1. **Build the Docker image:**
+   ```bash
+   docker build -t rag-gemini-chatbot .
+   ```
+2. **Run the container:**
+   ```bash
+   docker run --env-file .env -p 8501:8501 rag-gemini-chatbot
+   ```
+   - The app will be available at [http://localhost:8501](http://localhost:8501)
+   - Make sure your `.env` file is in the project root.
+
+### Run with Docker Compose (Recommended)
+
+1. **Start the app with Docker Compose:**
+   ```bash
+   docker-compose up --build
+   ```
+   - This will build the image (if needed), start the app, and map port 8501.
+   - The `chroma/` directory is mounted as a volume for persistent ChromaDB storage.
+
+2. **Stop the app:**
+   ```bash
+   docker-compose down
+   ```
+
+### Notes
+- All environment variables are loaded from your `.env` file.
+- Uploaded PDFs and ChromaDB data are persisted in the `chroma/` directory (thanks to the Docker volume).
+- You can deploy this container to any cloud or server that supports Docker.
+
 ---
 
 ## License
